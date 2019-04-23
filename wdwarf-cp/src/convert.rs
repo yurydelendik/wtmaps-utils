@@ -5,19 +5,23 @@ use gimli::write::{
     Expression, FileId, FileInfo, LineProgram, LineString, LineStringTable, Range, RangeList,
     RangeListTable, StringTable, Unit, UnitEntryId, UnitId, UnitTable,
 };
-use gimli::{self, Reader};
+use gimli::{DebugLineOffset, DwTag, Reader, UnitSectionOffset};
 use std::collections::HashMap;
 use std::vec::Vec;
 
+pub trait AddressTranslator {
+    fn translate_address(&self, addr: u64) -> Vec<Address>;
+    fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)>;
+}
 // Getting logic from gimli's src/write/{unit,range,line}.rs files.
 
-pub fn from_dwarf<R: Reader<Offset = usize>>(
+pub fn from_dwarf<R: Reader<Offset = usize>, A: AddressTranslator>(
     dwarf: &read::Dwarf<R>,
-    convert_address: &dyn Fn(u64) -> Option<Address>,
+    at: &A,
 ) -> ConvertResult<Dwarf> {
     let mut line_strings = LineStringTable::default();
     let mut strings = StringTable::default();
-    let units = from_unit_table(dwarf, &mut line_strings, &mut strings, convert_address)?;
+    let units = from_unit_table(dwarf, &mut line_strings, &mut strings, at)?;
     // TODO: convert the line programs that were not referenced by a unit.
     let line_programs = Vec::new();
     Ok(Dwarf {
@@ -28,11 +32,11 @@ pub fn from_dwarf<R: Reader<Offset = usize>>(
     })
 }
 
-pub fn from_unit_table<R: Reader<Offset = usize>>(
+pub fn from_unit_table<R: Reader<Offset = usize>, A: AddressTranslator>(
     dwarf: &read::Dwarf<R>,
     line_strings: &mut LineStringTable,
     strings: &mut StringTable,
-    convert_address: &dyn Fn(u64) -> Option<Address>,
+    at: &A,
 ) -> ConvertResult<UnitTable> {
     let mut units = UnitTable::default();
     let mut unit_entry_offsets = HashMap::new();
@@ -47,7 +51,7 @@ pub fn from_unit_table<R: Reader<Offset = usize>>(
             dwarf,
             line_strings,
             strings,
-            convert_address,
+            at,
         )?);
     }
 
@@ -80,37 +84,40 @@ pub fn from_unit_table<R: Reader<Offset = usize>>(
     Ok(units)
 }
 
-struct ConvertUnitContext<'a, R: Reader<Offset = usize>> {
+struct ConvertUnitContext<'a, R: Reader<Offset = usize>, A: AddressTranslator> {
     pub dwarf: &'a read::Dwarf<R>,
     pub unit: &'a read::Unit<R>,
     pub line_strings: &'a mut LineStringTable,
     pub strings: &'a mut StringTable,
     pub ranges: &'a mut RangeListTable,
-    pub convert_address: &'a dyn Fn(u64) -> Option<Address>,
+    pub at: &'a A,
     pub base_address: Address,
-    pub line_program_offset: Option<gimli::DebugLineOffset>,
+    pub line_program_offset: Option<DebugLineOffset>,
     pub line_program_files: Vec<FileId>,
 }
 
-fn from_unit_entry<R: Reader<Offset = usize>>(
+fn from_unit_entry<R: Reader<Offset = usize>, A: AddressTranslator>(
     from_header: read::CompilationUnitHeader<R>,
     units: &mut UnitTable,
-    unit_entry_offsets: &mut HashMap<gimli::UnitSectionOffset, (UnitId, UnitEntryId)>,
+    unit_entry_offsets: &mut HashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
     dwarf: &read::Dwarf<R>,
     line_strings: &mut LineStringTable,
     strings: &mut StringTable,
-    convert_address: &dyn Fn(u64) -> Option<Address>,
+    at: &A,
 ) -> ConvertResult<(UnitId, Vec<UnitEntryId>)> {
     let from_unit = dwarf.unit(from_header)?;
     let encoding = from_unit.encoding();
-    let base_address = convert_address(from_unit.low_pc).ok_or(ConvertError::InvalidAddress)?;
+    let base_address = *at
+        .translate_address(from_unit.low_pc)
+        .get(0)
+        .ok_or(ConvertError::InvalidAddress)?;
 
     let (line_program_offset, line_program, line_program_files) = match from_unit.line_program {
         Some(ref from_program) => {
             let from_program = from_program.clone();
             let line_program_offset = from_program.header().offset();
             let (line_program, line_program_files) =
-                from_line_program(from_program, dwarf, line_strings, strings, convert_address)?;
+                from_line_program(from_program, dwarf, line_strings, strings, at)?;
             (Some(line_program_offset), line_program, line_program_files)
         }
         None => (None, LineProgram::none(), Vec::new()),
@@ -128,7 +135,7 @@ fn from_unit_entry<R: Reader<Offset = usize>>(
         line_strings,
         strings,
         ranges: &mut ranges,
-        convert_address,
+        at,
         base_address,
         line_program_offset,
         line_program_files,
@@ -150,19 +157,19 @@ fn from_unit_entry<R: Reader<Offset = usize>>(
     Ok((unit_id, entries))
 }
 
-fn get_tag<R: Reader<Offset = usize>>(from: &read::EntriesTreeNode<R>) -> gimli::DwTag {
+fn get_tag<R: Reader<Offset = usize>>(from: &read::EntriesTreeNode<R>) -> DwTag {
     let from = from.entry();
     from.tag()
 }
 
-fn from_die<R: Reader<Offset = usize>>(
-    context: &mut ConvertUnitContext<R>,
+fn from_die<R: Reader<Offset = usize>, A: AddressTranslator>(
+    context: &mut ConvertUnitContext<R, A>,
     from: read::EntriesTreeNode<R>,
     unit: &mut Unit,
     unit_id: UnitId,
     entry_id: UnitEntryId,
     entries: &mut Vec<UnitEntryId>,
-    unit_entry_offsets: &mut HashMap<gimli::UnitSectionOffset, (UnitId, UnitEntryId)>,
+    unit_entry_offsets: &mut HashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
 ) -> ConvertResult<()> {
     {
         let from = from.entry();
@@ -199,8 +206,8 @@ fn from_die<R: Reader<Offset = usize>>(
     Ok(())
 }
 
-fn from_entry_attr<R: Reader<Offset = usize>>(
-    context: &mut ConvertUnitContext<R>,
+fn from_entry_attr<R: Reader<Offset = usize>, A: AddressTranslator>(
+    context: &mut ConvertUnitContext<R, A>,
     from: &read::Attribute<R>,
     entry: &mut DebuggingInformationEntry,
 ) -> ConvertResult<()> {
@@ -210,13 +217,13 @@ fn from_entry_attr<R: Reader<Offset = usize>>(
     Ok(())
 }
 
-fn from_attr_value<R: Reader<Offset = usize>>(
-    context: &mut ConvertUnitContext<R>,
+fn from_attr_value<R: Reader<Offset = usize>, A: AddressTranslator>(
+    context: &mut ConvertUnitContext<R, A>,
     from: read::AttributeValue<R>,
 ) -> ConvertResult<Option<AttributeValue>> {
     let to = match from {
-        read::AttributeValue::Addr(val) => match (context.convert_address)(val) {
-            Some(val) => AttributeValue::Address(val),
+        read::AttributeValue::Addr(val) => match context.at.translate_address(val).get(0) {
+            Some(val) => AttributeValue::Address(*val),
             None => return Err(ConvertError::InvalidAddress),
         },
         read::AttributeValue::Block(r) => AttributeValue::Block(r.to_slice()?.into()),
@@ -239,8 +246,8 @@ fn from_attr_value<R: Reader<Offset = usize>>(
         }
         read::AttributeValue::DebugAddrIndex(index) => {
             let val = context.dwarf.address(context.unit, index)?;
-            match (context.convert_address)(val) {
-                Some(val) => AttributeValue::Address(val),
+            match context.at.translate_address(val).get(0) {
+                Some(val) => AttributeValue::Address(*val),
                 None => return Err(ConvertError::InvalidAddress),
             }
         }
@@ -248,7 +255,7 @@ fn from_attr_value<R: Reader<Offset = usize>>(
             AttributeValue::UnitSectionRef(val.to_unit_section_offset(context.unit))
         }
         read::AttributeValue::DebugInfoRef(val) => {
-            AttributeValue::UnitSectionRef(gimli::UnitSectionOffset::DebugInfoOffset(val))
+            AttributeValue::UnitSectionRef(UnitSectionOffset::DebugInfoOffset(val))
         }
         read::AttributeValue::DebugInfoRefSup(val) => AttributeValue::DebugInfoRefSup(val),
         read::AttributeValue::DebugLineRef(val) => {
@@ -350,12 +357,18 @@ fn from_attr_value<R: Reader<Offset = usize>>(
     Ok(Some(to))
 }
 
-fn from_rangelist<R: Reader<Offset = usize>>(
+fn from_rangelist<R: Reader<Offset = usize>, A: AddressTranslator>(
     mut from: read::RawRngListIter<R>,
-    context: &ConvertUnitContext<R>,
+    context: &ConvertUnitContext<R, A>,
 ) -> ConvertResult<RangeList> {
     let mut have_base_address = context.base_address != Address::Absolute(0);
-    let convert_address = |x| (context.convert_address)(x).ok_or(ConvertError::InvalidAddress);
+    let convert_address = |x| {
+        if let Some(addr) = context.at.translate_address(x).get(0) {
+            Ok(*addr)
+        } else {
+            Err(ConvertError::InvalidAddress)
+        }
+    };
     let mut ranges = Vec::new();
     while let Some(from_range) = from.next()? {
         let range = match from_range {
@@ -419,12 +432,12 @@ fn from_rangelist<R: Reader<Offset = usize>>(
     Ok(RangeList(ranges))
 }
 
-fn from_line_program<R: Reader<Offset = usize>>(
+fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
     mut from_program: read::IncompleteLineProgram<R>,
     dwarf: &read::Dwarf<R>,
     line_strings: &mut LineStringTable,
     strings: &mut StringTable,
-    convert_address: &dyn Fn(u64) -> Option<Address>,
+    at: &A,
 ) -> ConvertResult<(LineProgram, Vec<FileId>)> {
     // Create mappings in case the source has duplicate files or directories.
     let mut dirs = Vec::new();
@@ -514,8 +527,8 @@ fn from_line_program<R: Reader<Offset = usize>>(
                 if program.in_sequence() {
                     return Err(ConvertError::UnsupportedLineInstruction);
                 }
-                match convert_address(val) {
-                    Some(val) => address = Some(val),
+                match at.translate_address(val).get(0) {
+                    Some(val) => address = Some(*val),
                     None => return Err(ConvertError::InvalidAddress),
                 }
                 from_row.execute(read::LineInstruction::SetAddress(0), &mut from_program);
