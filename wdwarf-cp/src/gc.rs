@@ -1,3 +1,4 @@
+use gimli::constants;
 use gimli::read;
 use gimli::{Reader, UnitSectionOffset};
 use std::collections::{HashMap, HashSet};
@@ -91,6 +92,44 @@ fn build_unit_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
     Ok(())
 }
 
+fn has_die_back_edge<R: Reader<Offset = usize>>(die: &read::DebuggingInformationEntry<R>) -> bool {
+    match die.tag() {
+        constants::DW_TAG_variable
+        | constants::DW_TAG_constant
+        | constants::DW_TAG_inlined_subroutine
+        | constants::DW_TAG_lexical_block
+        | constants::DW_TAG_label
+        | constants::DW_TAG_with_stmt
+        | constants::DW_TAG_try_block
+        | constants::DW_TAG_catch_block
+        | constants::DW_TAG_template_type_parameter
+        | constants::DW_TAG_member
+        | constants::DW_TAG_formal_parameter => true,
+        _ => false,
+    }
+}
+
+fn has_valid_code_range<R: Reader<Offset = usize>, A: AddressTranslator>(
+    die: &read::DebuggingInformationEntry<R>,
+    at: &A,
+) -> read::Result<bool> {
+    match die.tag() {
+        constants::DW_TAG_subprogram => {
+            if let Some(low_pc) = die.attr_value(constants::DW_AT_low_pc)? {
+                if let read::AttributeValue::Addr(a) = low_pc {
+                    return Ok(at.translate_address(a).len() > 0);
+                }
+            }
+            if let Some(ranges) = die.attr_value(constants::DW_AT_ranges)? {
+                // FIXME check ranges
+                return Ok(true);
+            }
+        }
+        _ => (),
+    }
+    Ok(false)
+}
+
 fn build_die_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
     die: read::EntriesTreeNode<R>,
     dwarf: &read::Dwarf<R>,
@@ -107,8 +146,15 @@ fn build_die_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
 
     let mut children = die.children();
     while let Some(child) = children.next()? {
-        let child_offset = child.entry().offset().to_unit_section_offset(unit);
+        let child_entry = child.entry();
+        let child_offset = child_entry.offset().to_unit_section_offset(unit);
         deps.add_edge(child_offset, offset);
+        if has_die_back_edge(child_entry) {
+            deps.add_edge(offset, child_offset);
+        }
+        if has_valid_code_range(child_entry, at)? {
+            deps.add_root(child_offset);
+        }
         build_die_dependencies(child, dwarf, unit, at, deps)?;
     }
     Ok(())
@@ -123,10 +169,6 @@ fn build_attr_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
     deps: &mut Dependencies,
 ) -> read::Result<()> {
     match attr.value() {
-        read::AttributeValue::Addr(val) => match at.translate_address(val).get(0) {
-            Some(_) => deps.add_root(offset),
-            None => (),
-        },
         read::AttributeValue::UnitRef(val) => {
             let ref_offset = val.to_unit_section_offset(unit);
             deps.add_edge(offset, ref_offset);

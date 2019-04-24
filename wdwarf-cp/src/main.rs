@@ -53,7 +53,15 @@ fn main() {
     let bin = fs::read(Path::new(&args.arg_source_file)).expect("file data");
     let dwarf = wasm::read_dwarf(&bin);
 
-    let new_dwarf = convert::from_dwarf(&dwarf, &AddressTranslator(false));
-    let deps = gc::build_dependencies(&dwarf, &AddressTranslator(true));
-    println!("Hello, world! {:?}", deps.expect("").get_reachable());
+    let deps = gc::build_dependencies(&dwarf, &AddressTranslator(true)).expect("deps");
+    let reachable = deps.get_reachable();
+    let mut new_dwarf = convert::from_dwarf(&dwarf, &AddressTranslator(false), &|uo| {
+        reachable.contains(&uo)
+    })
+    .expect("new dwarf");
+
+    let mut wasm = Vec::new();
+    wasm.extend_from_slice(wasm::WASM_HEADER);
+    wasm.extend_from_slice(&wasm::create_dwarf_sections(&mut new_dwarf));
+    fs::write(Path::new(&args.arg_output), &wasm).expect("write wasm");
 }

@@ -15,13 +15,18 @@ pub trait AddressTranslator {
 }
 // Getting logic from gimli's src/write/{unit,range,line}.rs files.
 
-pub fn from_dwarf<R: Reader<Offset = usize>, A: AddressTranslator>(
+pub fn from_dwarf<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
     dwarf: &read::Dwarf<R>,
     at: &A,
+    die_filter: &F,
 ) -> ConvertResult<Dwarf> {
     let mut line_strings = LineStringTable::default();
     let mut strings = StringTable::default();
-    let units = from_unit_table(dwarf, &mut line_strings, &mut strings, at)?;
+    let units = from_unit_table(dwarf, &mut line_strings, &mut strings, at, die_filter)?;
     // TODO: convert the line programs that were not referenced by a unit.
     let line_programs = Vec::new();
     Ok(Dwarf {
@@ -32,11 +37,16 @@ pub fn from_dwarf<R: Reader<Offset = usize>, A: AddressTranslator>(
     })
 }
 
-pub fn from_unit_table<R: Reader<Offset = usize>, A: AddressTranslator>(
+pub fn from_unit_table<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
     dwarf: &read::Dwarf<R>,
     line_strings: &mut LineStringTable,
     strings: &mut StringTable,
     at: &A,
+    die_filter: &F,
 ) -> ConvertResult<UnitTable> {
     let mut units = UnitTable::default();
     let mut unit_entry_offsets = HashMap::new();
@@ -52,6 +62,7 @@ pub fn from_unit_table<R: Reader<Offset = usize>, A: AddressTranslator>(
             line_strings,
             strings,
             at,
+            die_filter,
         )?);
     }
 
@@ -84,19 +95,28 @@ pub fn from_unit_table<R: Reader<Offset = usize>, A: AddressTranslator>(
     Ok(units)
 }
 
-struct ConvertUnitContext<'a, R: Reader<Offset = usize>, A: AddressTranslator> {
+struct ConvertUnitContext<
+    'a,
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+> {
     pub dwarf: &'a read::Dwarf<R>,
     pub unit: &'a read::Unit<R>,
     pub line_strings: &'a mut LineStringTable,
     pub strings: &'a mut StringTable,
-    pub ranges: &'a mut RangeListTable,
     pub at: &'a A,
+    pub die_filter: &'a F,
     pub base_address: Address,
     pub line_program_offset: Option<DebugLineOffset>,
     pub line_program_files: Vec<FileId>,
 }
 
-fn from_unit_entry<R: Reader<Offset = usize>, A: AddressTranslator>(
+fn from_unit_entry<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
     from_header: read::CompilationUnitHeader<R>,
     units: &mut UnitTable,
     unit_entry_offsets: &mut HashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
@@ -104,6 +124,7 @@ fn from_unit_entry<R: Reader<Offset = usize>, A: AddressTranslator>(
     line_strings: &mut LineStringTable,
     strings: &mut StringTable,
     at: &A,
+    die_filter: &F,
 ) -> ConvertResult<(UnitId, Vec<UnitEntryId>)> {
     let from_unit = dwarf.unit(from_header)?;
     let encoding = from_unit.encoding();
@@ -128,14 +149,13 @@ fn from_unit_entry<R: Reader<Offset = usize>, A: AddressTranslator>(
     let mut unit = units.get_mut(unit_id);
     let mut entries = Vec::new();
 
-    let mut ranges = RangeListTable::default();
     let mut context = ConvertUnitContext {
         dwarf,
         unit: &from_unit,
         line_strings,
         strings,
-        ranges: &mut ranges,
         at,
+        die_filter,
         base_address,
         line_program_offset,
         line_program_files,
@@ -143,16 +163,24 @@ fn from_unit_entry<R: Reader<Offset = usize>, A: AddressTranslator>(
     let mut from_tree = from_unit.entries_tree(None)?;
     let from_root = from_tree.root()?;
     let root_id = unit.root();
-    entries.push(root_id);
-    from_die(
-        &mut context,
-        from_root,
-        &mut unit,
-        unit_id,
-        root_id,
-        &mut entries,
-        unit_entry_offsets,
-    )?;
+
+    if die_filter(
+        from_root
+            .entry()
+            .offset()
+            .to_unit_section_offset(&from_unit),
+    ) {
+        entries.push(root_id);
+        from_die(
+            &mut context,
+            from_root,
+            &mut unit,
+            unit_id,
+            root_id,
+            &mut entries,
+            unit_entry_offsets,
+        )?;
+    }
 
     Ok((unit_id, entries))
 }
@@ -162,8 +190,8 @@ fn get_tag<R: Reader<Offset = usize>>(from: &read::EntriesTreeNode<R>) -> DwTag 
     from.tag()
 }
 
-fn from_die<R: Reader<Offset = usize>, A: AddressTranslator>(
-    context: &mut ConvertUnitContext<R, A>,
+fn from_die<R: Reader<Offset = usize>, A: AddressTranslator, F: Fn(UnitSectionOffset) -> bool>(
+    context: &mut ConvertUnitContext<R, A, F>,
     from: read::EntriesTreeNode<R>,
     unit: &mut Unit,
     unit_id: UnitId,
@@ -173,7 +201,6 @@ fn from_die<R: Reader<Offset = usize>, A: AddressTranslator>(
 ) -> ConvertResult<()> {
     {
         let from = from.entry();
-        let entry = unit.get_mut(entry_id);
 
         let offset = from.offset().to_unit_section_offset(context.unit);
         unit_entry_offsets.insert(offset, (unit_id, entry_id));
@@ -182,15 +209,23 @@ fn from_die<R: Reader<Offset = usize>, A: AddressTranslator>(
         while let Some(from_attr) = from_attrs.next()? {
             if from_attr.name() == constants::DW_AT_sibling {
                 // This may point to a null entry, so we have to treat it differently.
-                entry.set_sibling(true);
+                unit.get_mut(entry_id).set_sibling(true);
             } else {
-                from_entry_attr(context, &from_attr, entry)?;
+                from_entry_attr(context, &from_attr, unit, entry_id)?;
             }
         }
     }
 
     let mut from_children = from.children();
     while let Some(from_child) = from_children.next()? {
+        if !(context.die_filter)(
+            from_child
+                .entry()
+                .offset()
+                .to_unit_section_offset(context.unit),
+        ) {
+            continue;
+        }
         let child_id = unit.add(entry_id, get_tag(&from_child));
         entries.push(child_id);
         from_die(
@@ -206,19 +241,29 @@ fn from_die<R: Reader<Offset = usize>, A: AddressTranslator>(
     Ok(())
 }
 
-fn from_entry_attr<R: Reader<Offset = usize>, A: AddressTranslator>(
-    context: &mut ConvertUnitContext<R, A>,
+fn from_entry_attr<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
+    context: &mut ConvertUnitContext<R, A, F>,
     from: &read::Attribute<R>,
-    entry: &mut DebuggingInformationEntry,
+    unit: &mut Unit,
+    entry_id: UnitEntryId,
 ) -> ConvertResult<()> {
-    if let Some(value) = from_attr_value(context, from.value())? {
-        entry.set(from.name(), value);
+    if let Some(value) = from_attr_value(context, unit, from.value())? {
+        unit.get_mut(entry_id).set(from.name(), value);
     }
     Ok(())
 }
 
-fn from_attr_value<R: Reader<Offset = usize>, A: AddressTranslator>(
-    context: &mut ConvertUnitContext<R, A>,
+fn from_attr_value<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
+    context: &mut ConvertUnitContext<R, A, F>,
+    unit: &mut Unit,
     from: read::AttributeValue<R>,
 ) -> ConvertResult<Option<AttributeValue>> {
     let to = match from {
@@ -284,7 +329,7 @@ fn from_attr_value<R: Reader<Offset = usize>, A: AddressTranslator>(
                 .ranges
                 .raw_ranges(val, context.unit.encoding())?;
             let range_list = from_rangelist(iter, context)?;
-            let range_id = context.ranges.add(range_list);
+            let range_id = unit.ranges.add(range_list);
             AttributeValue::RangeListRef(range_id)
         }
         read::AttributeValue::DebugRngListsBase(_base) => {
@@ -299,7 +344,7 @@ fn from_attr_value<R: Reader<Offset = usize>, A: AddressTranslator>(
                 .ranges
                 .raw_ranges(offset, context.unit.encoding())?;
             let range_list = from_rangelist(iter, context)?;
-            let range_id = context.ranges.add(range_list);
+            let range_id = unit.ranges.add(range_list);
             AttributeValue::RangeListRef(range_id)
         }
         read::AttributeValue::DebugTypesRef(val) => AttributeValue::DebugTypesRef(val),
@@ -357,9 +402,13 @@ fn from_attr_value<R: Reader<Offset = usize>, A: AddressTranslator>(
     Ok(Some(to))
 }
 
-fn from_rangelist<R: Reader<Offset = usize>, A: AddressTranslator>(
+fn from_rangelist<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
     mut from: read::RawRngListIter<R>,
-    context: &ConvertUnitContext<R, A>,
+    context: &ConvertUnitContext<R, A, F>,
 ) -> ConvertResult<RangeList> {
     let mut have_base_address = context.base_address != Address::Absolute(0);
     let convert_address = |x| {
