@@ -35,6 +35,43 @@ fn read_dwarf_sections<'a>(bin: &'a [u8]) -> HashMap<&'a str, &'a [u8]> {
     sections
 }
 
+pub fn read_code_section_offset(bin: &[u8]) -> usize {
+    for sect in ModuleReader::new(bin).expect("wasm reader") {
+        let sect = sect.expect("section");
+        match sect.code {
+            SectionCode::Code => {
+                let code_section_offset = sect.range().start;
+                return code_section_offset;
+            }
+            _ => (),
+        }
+    }
+    panic!("code section was not found");
+}
+
+pub fn remove_debug_sections(bin: &mut Vec<u8>) {
+    let mut reader = ModuleReader::new(bin).expect("wasm reader");
+    let mut position = reader.current_position();
+    // Record debug section locations into the sections_to_remove.
+    let mut sections_to_remove = Vec::new();
+    while !reader.eof() {
+        {
+            let sect = reader.read().expect("section");
+            match sect.code {
+                SectionCode::Custom { name, .. } if to_section_id(name).is_some() => {
+                    sections_to_remove.push(position..sect.range().end);
+                }
+                _ => (),
+            }
+        }
+        position = reader.current_position();
+    }
+    // In reverse order, remove all of the sections_to_remove.
+    for range in sections_to_remove.into_iter().rev() {
+        bin.drain(range);
+    }
+}
+
 fn to_section_id(name: &str) -> Option<SectionId> {
     Some(match name {
         ".debug_abbrev" => SectionId::DebugAbbrev,
