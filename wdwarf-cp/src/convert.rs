@@ -146,7 +146,7 @@ struct ConvertUnitContext<
     pub strings: &'a mut StringTable,
     pub at: &'a A,
     pub die_filter: &'a F,
-    pub base_address: Address,
+    pub base_address: u64,
     pub line_program_offset: Option<DebugLineOffset>,
     pub line_program_files: Vec<FileId>,
 }
@@ -167,9 +167,7 @@ fn from_unit_entry<
 ) -> ConvertResult<(UnitId, Vec<UnitEntryId>)> {
     let from_unit = dwarf.unit(from_header)?;
     let encoding = from_unit.encoding();
-    let base_address = at
-        .translate_base_address(from_unit.low_pc)
-        .ok_or(ConvertError::InvalidAddress)?;
+    let base_address = from_unit.low_pc;
 
     let (line_program_offset, line_program, line_program_files) = match from_unit.line_program {
         Some(ref from_program) => {
@@ -305,9 +303,9 @@ fn from_attr_value<
     from: read::AttributeValue<R>,
 ) -> ConvertResult<Option<AttributeValue>> {
     let to = match from {
-        read::AttributeValue::Addr(val) => match context.at.translate_address(val).get(0) {
-            Some(val) => AttributeValue::Address(*val),
-            None => return Err(ConvertError::InvalidAddress),
+        read::AttributeValue::Addr(val) => match context.at.translate_base_address(val) {
+            Some(val) => AttributeValue::Address(val),
+            None => return Ok(None),
         },
         read::AttributeValue::Block(r) => AttributeValue::Block(r.to_slice()?.into()),
         read::AttributeValue::Data1(val) => AttributeValue::Data1(val),
@@ -329,9 +327,9 @@ fn from_attr_value<
         }
         read::AttributeValue::DebugAddrIndex(index) => {
             let val = context.dwarf.address(context.unit, index)?;
-            match context.at.translate_address(val).get(0) {
-                Some(val) => AttributeValue::Address(*val),
-                None => return Err(ConvertError::InvalidAddress),
+            match context.at.translate_base_address(val) {
+                Some(val) => AttributeValue::Address(val),
+                None => return Ok(None),
             }
         }
         read::AttributeValue::UnitRef(val) => {
@@ -351,7 +349,10 @@ fn from_attr_value<
             }
         }
         read::AttributeValue::DebugMacinfoRef(val) => AttributeValue::DebugMacinfoRef(val),
-        read::AttributeValue::LocationListsRef(val) => AttributeValue::LocationListsRef(val),
+        read::AttributeValue::LocationListsRef(val) => {
+            // FIXME AttributeValue::LocationListsRef(val),
+            return Ok(None);
+        }
         read::AttributeValue::DebugLocListsBase(_base) => {
             // We convert all location list indices to offsets,
             // so this is unneeded.
@@ -359,7 +360,8 @@ fn from_attr_value<
         }
         read::AttributeValue::DebugLocListsIndex(index) => {
             let offset = context.dwarf.locations_offset(context.unit, index)?;
-            AttributeValue::LocationListsRef(offset)
+            // FIXME AttributeValue::LocationListsRef(offset)
+            return Ok(None);
         }
         read::AttributeValue::RangeListsRef(val) => {
             let iter = context
@@ -448,75 +450,54 @@ fn from_rangelist<
     mut from: read::RawRngListIter<R>,
     context: &ConvertUnitContext<R, A, F>,
 ) -> ConvertResult<RangeList> {
-    let mut have_base_address = context.base_address != Address::Absolute(0);
-    let convert_address = |x| {
-        if let Some(addr) = context.at.translate_address(x).get(0) {
-            Ok(*addr)
-        } else {
-            Err(ConvertError::InvalidAddress)
-        }
+    let mut base_address = if context.base_address != 0 {
+        Some(context.base_address)
+    } else {
+        None
     };
     let mut ranges = Vec::new();
     while let Some(from_range) = from.next()? {
         let range = match from_range {
             read::RawRngListEntry::AddressOrOffsetPair { begin, end } => {
-                // These were parsed as addresses, even if they are offsets.
-                let begin = convert_address(begin)?;
-                let end = convert_address(end)?;
-                match (begin, end) {
-                    (Address::Absolute(begin_offset), Address::Absolute(end_offset)) => {
-                        if have_base_address {
-                            Range::OffsetPair {
-                                begin: begin_offset,
-                                end: end_offset,
-                            }
-                        } else {
-                            Range::StartEnd { begin, end }
-                        }
-                    }
-                    _ => {
-                        if have_base_address {
-                            // At least one of begin/end is an address, but we also have
-                            // a base address. Adding addresses is undefined.
-                            return Err(ConvertError::InvalidRangeRelativeAddress);
-                        }
-                        Range::StartEnd { begin, end }
-                    }
-                }
+                ranges.push(if let Some(base_address) = base_address {
+                    (begin + base_address, end - begin)
+                } else {
+                    (begin, end - begin)
+                });
             }
             read::RawRngListEntry::BaseAddress { addr } => {
-                have_base_address = true;
-                let address = convert_address(addr)?;
-                Range::BaseAddress { address }
+                base_address = Some(addr);
             }
             read::RawRngListEntry::BaseAddressx { addr } => {
-                have_base_address = true;
-                let address = convert_address(context.dwarf.address(context.unit, addr)?)?;
-                Range::BaseAddress { address }
+                let address = context.dwarf.address(context.unit, addr)?;
+                base_address = Some(address);
             }
             read::RawRngListEntry::StartxEndx { begin, end } => {
-                let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
-                let end = convert_address(context.dwarf.address(context.unit, end)?)?;
-                Range::StartEnd { begin, end }
+                let begin = context.dwarf.address(context.unit, begin)?;
+                let end = context.dwarf.address(context.unit, end)?;
+                ranges.push((begin, end - begin));
             }
             read::RawRngListEntry::StartxLength { begin, length } => {
-                let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
-                Range::StartLength { begin, length }
+                let begin = context.dwarf.address(context.unit, begin)?;
+                ranges.push((begin, length))
             }
-            read::RawRngListEntry::OffsetPair { begin, end } => Range::OffsetPair { begin, end },
+            read::RawRngListEntry::OffsetPair { begin, end } => {
+                ranges.push((begin + base_address.unwrap_or(0), end - begin))
+            }
             read::RawRngListEntry::StartEnd { begin, end } => {
-                let begin = convert_address(begin)?;
-                let end = convert_address(end)?;
-                Range::StartEnd { begin, end }
+                ranges.push((begin, end - begin));
             }
-            read::RawRngListEntry::StartLength { begin, length } => {
-                let begin = convert_address(begin)?;
-                Range::StartLength { begin, length }
-            }
+            read::RawRngListEntry::StartLength { begin, length } => ranges.push((begin, length)),
         };
-        ranges.push(range);
     }
-    Ok(RangeList(ranges))
+    let mut range_list = Vec::new();
+    for (start, len) in ranges {
+        let translated = context.at.translate_range(start, len);
+        for (begin, length) in translated {
+            range_list.push(Range::StartLength { begin, length });
+        }
+    }
+    Ok(RangeList(range_list))
 }
 
 #[derive(Debug)]
@@ -669,11 +650,12 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
                         let translate_address = temp_line_sequence.translate_base_address(at);
                         // Process sequence only with valid translated address.
                         // TODO rely on translate_address() to return None.
-                        let translate_address = if let Some(Address::Absolute(0)) = translate_address {
-                            None
-                        } else {
-                            translate_address
-                        };
+                        let translate_address =
+                            if let Some(Address::Absolute(0)) = translate_address {
+                                None
+                            } else {
+                                translate_address
+                            };
                         if translate_address.is_some() {
                             program.begin_sequence(translate_address);
                             let mut translated_rows = Vec::new();

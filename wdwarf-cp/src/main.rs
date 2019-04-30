@@ -67,7 +67,7 @@ fn main() {
 
     let deps = gc::build_dependencies(&dwarf, &AddressTranslator(true)).expect("deps");
     let reachable = deps.get_reachable();
-    let mut new_dwarf = convert::from_dwarf(&dwarf, &AddressTranslator(false), &|uo| {
+    let mut new_dwarf = convert::from_dwarf(&dwarf, &AddressTranslator(true), &|uo| {
         reachable.contains(&uo)
     })
     .expect("new dwarf");
