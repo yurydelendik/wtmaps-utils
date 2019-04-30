@@ -9,9 +9,48 @@ use gimli::{DebugLineOffset, DwTag, Reader, UnitSectionOffset};
 use std::collections::HashMap;
 use std::vec::Vec;
 
+fn calc_address_offset(addr1: Address, addr2: Address) -> u64 {
+    match (addr1, addr2) {
+        (Address::Absolute(val1), Address::Absolute(val2)) => val2 - val1,
+        (
+            Address::Relative {
+                symbol: s1,
+                addend: a1,
+            },
+            Address::Relative {
+                symbol: s2,
+                addend: a2,
+            },
+        ) if s1 == s2 => (a2 - a1) as u64,
+        _ => panic!("incompatible addresses"),
+    }
+}
+
 pub trait AddressTranslator {
     fn translate_address(&self, addr: u64) -> Vec<Address>;
+
     fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)>;
+
+    fn translate_base_address(&self, addr: u64) -> Option<Address> {
+        let addresses = self.translate_address(addr);
+        if addresses.len() == 0 {
+            None
+        } else {
+            Some(addresses[0])
+        }
+    }
+
+    fn translate_offset(&self, base: u64, offset: u64) -> Vec<u64> {
+        let translated_base = self.translate_base_address(base);
+        if translated_base.is_none() {
+            return vec![];
+        }
+        let addresses = self.translate_address(base + offset);
+        addresses
+            .into_iter()
+            .map(|a| calc_address_offset(translated_base.unwrap(), a))
+            .collect::<Vec<_>>()
+    }
 }
 // Getting logic from gimli's src/write/{unit,range,line}.rs files.
 
@@ -128,9 +167,8 @@ fn from_unit_entry<
 ) -> ConvertResult<(UnitId, Vec<UnitEntryId>)> {
     let from_unit = dwarf.unit(from_header)?;
     let encoding = from_unit.encoding();
-    let base_address = *at
-        .translate_address(from_unit.low_pc)
-        .get(0)
+    let base_address = at
+        .translate_base_address(from_unit.low_pc)
         .ok_or(ConvertError::InvalidAddress)?;
 
     let (line_program_offset, line_program, line_program_files) = match from_unit.line_program {
@@ -481,6 +519,48 @@ fn from_rangelist<
     Ok(RangeList(ranges))
 }
 
+#[derive(Debug)]
+struct TempLineSequence {
+    base_address: Option<u64>,
+    rows: Vec<TempLineRow>,
+}
+
+impl TempLineSequence {
+    fn new() -> Self {
+        TempLineSequence {
+            base_address: None,
+            rows: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.base_address = None;
+        self.rows.clear();
+    }
+
+    fn translate_base_address<A: AddressTranslator>(&self, at: &A) -> Option<Address> {
+        if self.base_address.is_none() {
+            return None;
+        }
+        at.translate_base_address(self.base_address.unwrap())
+    }
+}
+
+#[derive(Debug)]
+struct TempLineRow {
+    pub address_offset: u64,
+    pub op_index: u64,
+    pub file: FileId,
+    pub line: u64,
+    pub column: u64,
+    pub discriminator: u64,
+    pub is_statement: bool,
+    pub basic_block: bool,
+    pub prologue_end: bool,
+    pub epilogue_begin: bool,
+    pub isa: u64,
+}
+
 fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
     mut from_program: read::IncompleteLineProgram<R>,
     dwarf: &read::Dwarf<R>,
@@ -569,56 +649,89 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
     // us preserve address relocations.
     let mut from_row = read::LineRow::new(from_program.header());
     let mut instructions = from_program.header().instructions();
-    let mut address = None;
+    let mut temp_line_sequence = TempLineSequence::new();
     while let Some(instruction) = instructions.next_instruction(from_program.header())? {
         match instruction {
             read::LineInstruction::SetAddress(val) => {
                 if program.in_sequence() {
                     return Err(ConvertError::UnsupportedLineInstruction);
                 }
-                match at.translate_address(val).get(0) {
-                    Some(val) => address = Some(*val),
-                    None => return Err(ConvertError::InvalidAddress),
-                }
-                from_row.execute(read::LineInstruction::SetAddress(0), &mut from_program);
+                temp_line_sequence.base_address = Some(val);
+                from_row.execute(read::LineInstruction::SetAddress(val), &mut from_program);
             }
             read::LineInstruction::DefineFile(_) => {
                 return Err(ConvertError::UnsupportedLineInstruction);
             }
             _ => {
                 if from_row.execute(instruction, &mut from_program) {
-                    if !program.in_sequence() {
-                        program.begin_sequence(address);
-                        address = None;
-                    }
                     if from_row.end_sequence() {
-                        program.end_sequence(from_row.address());
+                        assert!(!program.in_sequence());
+                        let translate_address = temp_line_sequence.translate_base_address(at);
+                        // Process sequence only with valid translated address.
+                        // TODO rely on translate_address() to return None.
+                        let translate_address = if let Some(Address::Absolute(0)) = translate_address {
+                            None
+                        } else {
+                            translate_address
+                        };
+                        if translate_address.is_some() {
+                            program.begin_sequence(translate_address);
+                            let mut translated_rows = Vec::new();
+                            for row in temp_line_sequence.rows.iter() {
+                                let translated_offsets = at.translate_offset(
+                                    temp_line_sequence.base_address.unwrap(),
+                                    row.address_offset,
+                                );
+                                for translated_offset in translated_offsets {
+                                    translated_rows.push((translated_offset, row));
+                                }
+                            }
+                            translated_rows.sort_by(|(a, _), (b, _)| a.cmp(b));
+                            for (address_offset, row) in translated_rows {
+                                program.row().address_offset = address_offset;
+                                program.row().op_index = row.op_index;
+                                program.row().file = row.file;
+                                program.row().line = row.line;
+                                program.row().column = row.column;
+                                program.row().discriminator = row.discriminator;
+                                program.row().is_statement = row.is_statement;
+                                program.row().basic_block = row.basic_block;
+                                program.row().prologue_end = row.prologue_end;
+                                program.row().epilogue_begin = row.epilogue_begin;
+                                program.row().isa = row.isa;
+                                program.generate_row();
+                            }
+                            program.end_sequence(from_row.address());
+                        }
+                        temp_line_sequence.clear();
                     } else {
-                        program.row().address_offset = from_row.address();
-                        program.row().op_index = from_row.op_index();
-                        program.row().file = {
-                            let file = from_row.file_index();
-                            if file > files.len() as u64 {
-                                return Err(ConvertError::InvalidFileIndex);
-                            }
-                            if file == 0 && program.version() <= 4 {
-                                return Err(ConvertError::InvalidFileIndex);
-                            }
-                            assert!(file > 0, "not implemented for versio 5's file == 0");
-                            files[file as usize - 1]
+                        let temp_line_row = TempLineRow {
+                            address_offset: from_row.address(),
+                            op_index: from_row.op_index(),
+                            file: {
+                                let file = from_row.file_index();
+                                if file > files.len() as u64 {
+                                    return Err(ConvertError::InvalidFileIndex);
+                                }
+                                if file == 0 && program.version() <= 4 {
+                                    return Err(ConvertError::InvalidFileIndex);
+                                }
+                                assert!(file > 0, "not implemented for versio 5's file == 0");
+                                files[file as usize - 1]
+                            },
+                            line: from_row.line().unwrap_or(0),
+                            column: match from_row.column() {
+                                read::ColumnType::LeftEdge => 0,
+                                read::ColumnType::Column(val) => val,
+                            },
+                            discriminator: from_row.discriminator(),
+                            is_statement: from_row.is_stmt(),
+                            basic_block: from_row.basic_block(),
+                            prologue_end: from_row.prologue_end(),
+                            epilogue_begin: from_row.epilogue_begin(),
+                            isa: from_row.isa(),
                         };
-                        program.row().line = from_row.line().unwrap_or(0);
-                        program.row().column = match from_row.column() {
-                            read::ColumnType::LeftEdge => 0,
-                            read::ColumnType::Column(val) => val,
-                        };
-                        program.row().discriminator = from_row.discriminator();
-                        program.row().is_statement = from_row.is_stmt();
-                        program.row().basic_block = from_row.basic_block();
-                        program.row().prologue_end = from_row.prologue_end();
-                        program.row().epilogue_begin = from_row.epilogue_begin();
-                        program.row().isa = from_row.isa();
-                        program.generate_row();
+                        temp_line_sequence.rows.push(temp_line_row);
                     }
                     from_row.reset(from_program.header());
                 }

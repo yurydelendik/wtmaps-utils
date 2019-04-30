@@ -11,6 +11,7 @@ impl convert::AddressTranslator for AddressTranslator {
         }
         vec![write::Address::Absolute(addr)]
     }
+
     fn translate_range(&self, start: u64, len: u64) -> Vec<(write::Address, u64)> {
         if start == 0 && self.0 {
             return vec![];
