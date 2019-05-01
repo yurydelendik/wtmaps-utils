@@ -1,4 +1,4 @@
-use crate::address_translator::AddressTranslator;
+use crate::address_translator::IdentityAddressTranslator;
 use docopt::Docopt;
 use serde::Deserialize;
 use std::fs;
@@ -65,9 +65,9 @@ fn main() {
         (None, Vec::from(wasm::WASM_HEADER))
     };
 
-    let deps = gc::build_dependencies(&dwarf, &AddressTranslator(true)).expect("deps");
+    let deps = gc::build_dependencies(&dwarf, &IdentityAddressTranslator(true)).expect("deps");
     let reachable = deps.get_reachable();
-    let mut new_dwarf = convert::from_dwarf(&dwarf, &AddressTranslator(true), &|uo| {
+    let mut new_dwarf = convert::from_dwarf(&dwarf, &IdentityAddressTranslator(true), &|uo| {
         reachable.contains(&uo)
     })
     .expect("new dwarf");

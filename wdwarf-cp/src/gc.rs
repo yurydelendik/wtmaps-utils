@@ -4,7 +4,7 @@ use gimli::{Reader, UnitSectionOffset};
 use std::collections::{HashMap, HashSet};
 use std::vec::Vec;
 
-use crate::convert::AddressTranslator;
+use crate::address_translator::AddressTranslator;
 
 #[derive(Debug)]
 pub struct Dependencies {
