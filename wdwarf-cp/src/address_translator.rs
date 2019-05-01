@@ -1,5 +1,22 @@
 use gimli::write::Address;
+use std::collections::BTreeMap;
 use std::vec::Vec;
+
+pub struct AddressMap {
+    pub keypoints: BTreeMap<usize, usize>,
+}
+
+impl AddressMap {
+    pub fn new() -> Self {
+        AddressMap {
+            keypoints: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: usize, addr: usize) {
+        self.keypoints.insert(key, addr);
+    }
+}
 
 fn calc_address_offset(addr1: Address, addr2: Address) -> u64 {
     match (addr1, addr2) {
@@ -57,6 +74,32 @@ impl AddressTranslator for IdentityAddressTranslator {
 
     fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)> {
         if start == 0 && self.0 {
+            return vec![];
+        }
+        vec![(Address::Constant(start), len)]
+    }
+}
+
+pub struct TranformAddressTranslator {
+    map: AddressMap,
+}
+
+impl TranformAddressTranslator {
+    pub fn new(map: AddressMap) -> Self {
+        TranformAddressTranslator { map }
+    }
+}
+
+impl AddressTranslator for TranformAddressTranslator {
+    fn translate_address(&self, addr: u64) -> Vec<Address> {
+        if addr == 0 {
+            return vec![];
+        }
+        vec![Address::Constant(addr)]
+    }
+
+    fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)> {
+        if start == 0 {
             return vec![];
         }
         vec![(Address::Constant(start), len)]

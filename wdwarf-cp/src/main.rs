@@ -1,5 +1,5 @@
-use crate::address_translator::IdentityAddressTranslator;
 use docopt::Docopt;
+use gimli::{self, read, write};
 use serde::Deserialize;
 use std::fs;
 use std::io::BufReader;
@@ -35,6 +35,15 @@ struct Args {
     flag_wasm_file: Option<String>,
 }
 
+fn build_new_dwarf<R: gimli::Reader<Offset = usize>, A: address_translator::AddressTranslator>(
+    dwarf: read::Dwarf<R>,
+    at: A,
+) -> write::ConvertResult<write::Dwarf> {
+    let deps = gc::build_dependencies(&dwarf, &at).expect("deps");
+    let reachable = deps.get_reachable();
+    convert::from_dwarf(&dwarf, &at, &|uo| reachable.contains(&uo))
+}
+
 fn main() {
     let args: Args = Docopt::new(USAGE)
         .and_then(|d| d.help(true).deserialize())
@@ -43,7 +52,7 @@ fn main() {
     let bin = fs::read(Path::new(&args.arg_source_file)).expect("file data");
     let dwarf = wasm::read_dwarf(&bin);
 
-    let (_transform, input_wasm) = if let Some(source_map_file) = &args.flag_source_map {
+    let (map, input_wasm) = if let Some(source_map_file) = &args.flag_source_map {
         let (input_wasm, code_section_offset) = {
             let wasm_input_file = args
                 .flag_wasm_file
@@ -56,20 +65,22 @@ fn main() {
         };
 
         let file = fs::File::open(source_map_file).expect("json file");
-        let transform =
-            json_map::read_json_map_transform(BufReader::new(file), code_section_offset)
-                .expect("json");
+        let map = json_map::read_json_map_transform(BufReader::new(file), code_section_offset)
+            .expect("json");
 
-        (Some(transform), input_wasm)
+        (Some(map), input_wasm)
     } else {
         (None, Vec::from(wasm::WASM_HEADER))
     };
 
-    let deps = gc::build_dependencies(&dwarf, &IdentityAddressTranslator(true)).expect("deps");
-    let reachable = deps.get_reachable();
-    let mut new_dwarf = convert::from_dwarf(&dwarf, &IdentityAddressTranslator(true), &|uo| {
-        reachable.contains(&uo)
-    })
+    let mut new_dwarf = if let Some(map) = map {
+        build_new_dwarf(
+            dwarf,
+            address_translator::TranformAddressTranslator::new(map),
+        )
+    } else {
+        build_new_dwarf(dwarf, address_translator::IdentityAddressTranslator(true))
+    }
     .expect("new dwarf");
 
     let mut wasm = Vec::new();

@@ -1,3 +1,4 @@
+use crate::address_translator::AddressMap;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::io::Result;
@@ -12,7 +13,7 @@ struct SourceMap {
     mappings: String,
 }
 
-pub fn read_json_map_transform<R: Read>(reader: R, code_section_offset: u64) -> Result<()> {
+pub fn read_json_map_transform<R: Read>(reader: R, code_section_offset: u64) -> Result<AddressMap> {
     let map: SourceMap = serde_json::from_reader(reader)?;
     if map.version != 3 {
         panic!("invalid map version");
@@ -22,7 +23,7 @@ pub fn read_json_map_transform<R: Read>(reader: R, code_section_offset: u64) -> 
         panic!("invalid mappings")
     }
 
-    let mut decoded = Vec::new();
+    let mut decoded = AddressMap::new();
     let mut last_addr = -(code_section_offset as i64);
     let mut last_col = 0;
     for (addr_delta, col_delta) in mappings.split(',').map(|entry: &str| {
@@ -35,7 +36,7 @@ pub fn read_json_map_transform<R: Read>(reader: R, code_section_offset: u64) -> 
     }) {
         last_addr += addr_delta;
         last_col += col_delta;
-        decoded.push((last_addr, last_col));
+        decoded.insert(last_addr as usize, last_col as usize);
     }
-    Ok(())
+    Ok(decoded)
 }
