@@ -1,9 +1,9 @@
 use gimli::constants;
 use gimli::read;
 use gimli::write::{
-    Address, AttributeValue, ConvertError, ConvertResult, DebuggingInformationEntry, Dwarf,
-    Expression, FileId, FileInfo, LineProgram, LineString, LineStringTable, Range, RangeList,
-    RangeListTable, StringTable, Unit, UnitEntryId, UnitId, UnitTable,
+    Address, AttributeValue, ConvertError, ConvertResult, Dwarf, Expression, FileId, FileInfo,
+    LineProgram, LineString, LineStringTable, Location, LocationList, Range, RangeList,
+    StringTable, Unit, UnitEntryId, UnitId, UnitTable,
 };
 use gimli::{DebugLineOffset, DwTag, Reader, UnitSectionOffset};
 use std::collections::HashMap;
@@ -350,8 +350,13 @@ fn from_attr_value<
         }
         read::AttributeValue::DebugMacinfoRef(val) => AttributeValue::DebugMacinfoRef(val),
         read::AttributeValue::LocationListsRef(val) => {
-            // FIXME AttributeValue::LocationListsRef(val),
-            return Ok(None);
+            let iter = context
+                .dwarf
+                .locations
+                .raw_locations(val, context.unit.encoding())?;
+            let loc_list = from_loclist(iter, context)?;
+            let loc_id = unit.locations.add(loc_list);
+            AttributeValue::LocationListsRef(loc_id)
         }
         read::AttributeValue::DebugLocListsBase(_base) => {
             // We convert all location list indices to offsets,
@@ -360,8 +365,13 @@ fn from_attr_value<
         }
         read::AttributeValue::DebugLocListsIndex(index) => {
             let offset = context.dwarf.locations_offset(context.unit, index)?;
-            // FIXME AttributeValue::LocationListsRef(offset)
-            return Ok(None);
+            let iter = context
+                .dwarf
+                .locations
+                .raw_locations(offset, context.unit.encoding())?;
+            let loc_list = from_loclist(iter, context)?;
+            let loc_id = unit.locations.add(loc_list);
+            AttributeValue::LocationListsRef(loc_id)
         }
         read::AttributeValue::RangeListsRef(val) => {
             let iter = context
@@ -498,6 +508,101 @@ fn from_rangelist<
         }
     }
     Ok(RangeList(range_list))
+}
+
+fn from_loclist<
+    R: Reader<Offset = usize>,
+    A: AddressTranslator,
+    F: Fn(UnitSectionOffset) -> bool,
+>(
+    mut from: read::RawLocListIter<R>,
+    context: &ConvertUnitContext<R, A, F>,
+) -> ConvertResult<LocationList> {
+    let mut base_address = if context.base_address != 0 {
+        Some(context.base_address)
+    } else {
+        None
+    };
+    let mut locations = Vec::new();
+    while let Some(from_loc) = from.next()? {
+        let loc = match from_loc {
+            read::RawLocListEntry::AddressOrOffsetPair {
+                begin,
+                end,
+                ref data,
+            } => {
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push(if let Some(base_address) = base_address {
+                    (begin + base_address, end - begin, data)
+                } else {
+                    (begin, end - begin, data)
+                });
+            }
+            read::RawLocListEntry::BaseAddress { addr } => {
+                base_address = Some(addr);
+            }
+            read::RawLocListEntry::BaseAddressx { addr } => {
+                let address = context.dwarf.address(context.unit, addr)?;
+                base_address = Some(address);
+            }
+            read::RawLocListEntry::StartxEndx {
+                begin,
+                end,
+                ref data,
+            } => {
+                let begin = context.dwarf.address(context.unit, begin)?;
+                let end = context.dwarf.address(context.unit, end)?;
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push((begin, end - begin, data));
+            }
+            read::RawLocListEntry::StartxLength {
+                begin,
+                length,
+                ref data,
+            } => {
+                let begin = context.dwarf.address(context.unit, begin)?;
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push((begin, length, data))
+            }
+            read::RawLocListEntry::OffsetPair {
+                begin,
+                end,
+                ref data,
+            } => {
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push((begin + base_address.unwrap_or(0), end - begin, data))
+            }
+            read::RawLocListEntry::StartEnd {
+                begin,
+                end,
+                ref data,
+            } => {
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push((begin, end - begin, data));
+            }
+            read::RawLocListEntry::StartLength {
+                begin,
+                length,
+                ref data,
+            } => {
+                let data = Expression(data.0.to_slice()?.into());
+                locations.push((begin, length, data));
+            }
+            read::RawLocListEntry::DefaultLocation { .. } => panic!("not supported"),
+        };
+    }
+    let mut loc_list = Vec::new();
+    for (start, len, ref data) in locations {
+        let translated = context.at.translate_range(start, len);
+        for (begin, length) in translated {
+            loc_list.push(Location::StartLength {
+                begin,
+                length,
+                data: data.clone(),
+            });
+        }
+    }
+    Ok(LocationList(loc_list))
 }
 
 #[derive(Debug)]
