@@ -6,4 +6,5 @@ members = [
 ]
 
 [patch.crates-io]
-gimli = { git = "https://github.com/gimli-rs/gimli", rev="912e393b77e4578d2e2e89a4cba38716c873749c" }
+# gimli = { git = "https://github.com/gimli-rs/gimli", rev="912e393b77e4578d2e2e89a4cba38716c873749c" }
+gimli = { git = "https://github.com/yurydelendik/gimli", branch="debug_loc" }

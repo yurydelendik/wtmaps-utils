@@ -11,13 +11,13 @@ use std::vec::Vec;
 
 fn calc_address_offset(addr1: Address, addr2: Address) -> u64 {
     match (addr1, addr2) {
-        (Address::Absolute(val1), Address::Absolute(val2)) => val2 - val1,
+        (Address::Constant(val1), Address::Constant(val2)) => val2 - val1,
         (
-            Address::Relative {
+            Address::Symbol {
                 symbol: s1,
                 addend: a1,
             },
-            Address::Relative {
+            Address::Symbol {
                 symbol: s2,
                 addend: a2,
             },
@@ -651,7 +651,7 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
                         // Process sequence only with valid translated address.
                         // TODO rely on translate_address() to return None.
                         let translate_address =
-                            if let Some(Address::Absolute(0)) = translate_address {
+                            if let Some(Address::Constant(0)) = translate_address {
                                 None
                             } else {
                                 translate_address

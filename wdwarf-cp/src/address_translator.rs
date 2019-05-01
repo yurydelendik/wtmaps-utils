@@ -9,13 +9,13 @@ impl convert::AddressTranslator for AddressTranslator {
         if addr == 0 && self.0 {
             return vec![];
         }
-        vec![write::Address::Absolute(addr)]
+        vec![write::Address::Constant(addr)]
     }
 
     fn translate_range(&self, start: u64, len: u64) -> Vec<(write::Address, u64)> {
         if start == 0 && self.0 {
             return vec![];
         }
-        vec![(write::Address::Absolute(start), len)]
+        vec![(write::Address::Constant(start), len)]
     }
 }
