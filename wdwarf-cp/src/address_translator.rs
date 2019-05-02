@@ -2,10 +2,28 @@ use gimli::write::Address;
 use std::collections::BTreeMap;
 use std::vec::Vec;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TargetAddress(pub u64);
+
+impl Into<u64> for TargetAddress {
+    fn into(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OriginalAddress(pub u64);
+
+impl Into<u64> for OriginalAddress {
+    fn into(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 struct Range {
-    keypoints: Vec<(usize, usize)>,
-    last: usize,
+    keypoints: Vec<(OriginalAddress, TargetAddress)>,
+    last: TargetAddress,
 }
 
 #[derive(Debug)]
@@ -18,20 +36,20 @@ impl AddressMap {
         AddressMap { ranges: vec![] }
     }
 
-    fn start_range(&mut self, key: usize, addr: usize) {
+    fn start_range(&mut self, key: TargetAddress, addr: OriginalAddress) {
         self.ranges.push(Range {
             keypoints: vec![(addr, key)],
             last: key,
         });
     }
 
-    pub fn insert(&mut self, key: usize, addr: usize) {
+    pub fn insert(&mut self, key: TargetAddress, addr: OriginalAddress) {
         if self.ranges.len() == 0 {
             self.start_range(key, addr);
             return;
         }
         let last_range = self.ranges.last_mut().unwrap();
-        if last_range.last <= addr {
+        if last_range.keypoints.last().unwrap().0 <= addr {
             last_range.keypoints.push((addr, key));
             last_range.last = key;
             return;
@@ -42,30 +60,32 @@ impl AddressMap {
 }
 
 type AddressMapIndexRanges = Vec<usize>;
+type FunctionRange = std::ops::Range<TargetAddress>;
 
 #[derive(Debug)]
 struct AddressMapIndexed {
     map: AddressMap,
-    index: BTreeMap<usize, AddressMapIndexRanges>,
+    index: BTreeMap<OriginalAddress, AddressMapIndexRanges>,
+    function_ranges: Box<[FunctionRange]>,
 }
 
 impl AddressMapIndexed {
-    fn generate_index(map: &AddressMap) -> BTreeMap<usize, AddressMapIndexRanges> {
+    fn generate_index(map: &AddressMap) -> BTreeMap<OriginalAddress, AddressMapIndexRanges> {
         // Sorting ranges by first address.
-        let mut sorted_map: BTreeMap<usize, (&Range, usize)> = BTreeMap::new();
+        let mut sorted_map: BTreeMap<OriginalAddress, (&Range, usize)> = BTreeMap::new();
         for (index, range) in map.ranges.iter().enumerate() {
             let first_addr = range.keypoints.first().unwrap().0;
             sorted_map.insert(first_addr, (range, index));
         }
         // Sweeping all sorted by start address ranges and populating the result as
         // we pass the stored in active_ranges temp values.
-        let mut active_ranges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        let mut result: BTreeMap<usize, AddressMapIndexRanges> = BTreeMap::new();
+        let mut active_ranges: BTreeMap<OriginalAddress, Vec<usize>> = BTreeMap::new();
+        let mut result: BTreeMap<OriginalAddress, AddressMapIndexRanges> = BTreeMap::new();
         for (first_addr, (range, index)) in sorted_map {
             let last_addr = range.keypoints.last().unwrap().0;
             loop {
                 // Removing ranges we already passed.
-                let addr = *if let Some(addr) = active_ranges.keys().next() {
+                let addr: OriginalAddress = *if let Some(addr) = active_ranges.keys().next() {
                     addr
                 } else {
                     break;
@@ -101,13 +121,100 @@ impl AddressMapIndexed {
         result
     }
 
-    fn from(map: AddressMap) -> AddressMapIndexed {
+    fn from(map: AddressMap, mut function_ranges: Box<[(u64, u64)]>) -> AddressMapIndexed {
+        function_ranges.sort();
+        let function_ranges = function_ranges
+            .into_iter()
+            .map(|(b, e)| TargetAddress(*b)..TargetAddress(*e))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let index = AddressMapIndexed::generate_index(&map);
-        AddressMapIndexed { map, index }
+        AddressMapIndexed {
+            map,
+            index,
+            function_ranges,
+        }
     }
 
-    fn lookup_address(&self, addr: u64) -> Option<u64> {
-        let addr = addr as usize;
+    fn lookup_function_range_by_target_address(
+        &self,
+        addr: TargetAddress,
+    ) -> Option<&FunctionRange> {
+        match self
+            .function_ranges
+            .binary_search_by(|x| x.start.cmp(&addr))
+        {
+            // Landed on start of the function range -- simple.
+            Ok(i) => return Some(&self.function_ranges[i]),
+            Err(i) => {
+                // Check if previous range contains the addr
+                if i > 0
+                    && self.function_ranges[i - 1].start <= addr
+                    && addr < self.function_ranges[i - 1].end
+                {
+                    return Some(&self.function_ranges[i - 1]);
+                }
+            }
+        }
+        None
+    }
+
+    fn lookup_function_range(&self, addrs: &[OriginalAddress]) -> Option<&FunctionRange> {
+        // Report function range if TargetAddress in the function range.
+        for addr in addrs {
+            let ranges = self.index.range(..=addr).last();
+            if ranges.is_none() {
+                break;
+            }
+            for range_index in ranges.unwrap().1 {
+                let range = &self.map.ranges[*range_index];
+                let pos = range.keypoints.binary_search_by(|x| x.0.cmp(&addr));
+                match pos {
+                    Ok(i) => {
+                        // Check if keypoint's target address located in the function range.
+                        if let Some(range) =
+                            self.lookup_function_range_by_target_address(range.keypoints[i].1)
+                        {
+                            return Some(range);
+                        }
+                    }
+                    Err(i) => {
+                        // Not found the exact keypoint.
+                        if i == 0 {
+                            assert!(i < range.keypoints.len());
+                            // No left boundary to check, assuming it is the same as the next
+                            // keypoint's target address function range.
+                            if let Some(range) =
+                                self.lookup_function_range_by_target_address(range.keypoints[i].1)
+                            {
+                                return Some(range);
+                            }
+                        } else if let Some(left_range) =
+                            self.lookup_function_range_by_target_address(range.keypoints[i - 1].1)
+                        {
+                            if i >= range.keypoints.len() {
+                                // No right boundary, but we already found the left keypoint has
+                                // the function range -- using that.
+                                return Some(left_range);
+                            } else if let Some(right_range) =
+                                self.lookup_function_range_by_target_address(range.keypoints[i].1)
+                            {
+                                // We prefer right function range
+                                return Some(right_range);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn lookup_address(
+        &self,
+        addr: OriginalAddress,
+        clamp_to: Option<&FunctionRange>,
+    ) -> Option<TargetAddress> {
         let ranges = self.index.range(..=addr).last();
         if ranges.is_none() {
             return None;
@@ -126,7 +233,7 @@ impl AddressMapIndexed {
                 }
             };
             // FIXME iterate on all possible variants.
-            return Some(result as u64);
+            return Some(result);
         }
         None
     }
@@ -203,8 +310,8 @@ pub struct TranformAddressTranslator {
 }
 
 impl TranformAddressTranslator {
-    pub fn new(map: AddressMap) -> Self {
-        let map = AddressMapIndexed::from(map);
+    pub fn new(map: AddressMap, function_ranges: Box<[(u64, u64)]>) -> Self {
+        let map = AddressMapIndexed::from(map, function_ranges);
         TranformAddressTranslator { map }
     }
 }
@@ -214,8 +321,8 @@ impl AddressTranslator for TranformAddressTranslator {
         if addr == 0 {
             return vec![];
         }
-        if let Some(addr) = self.map.lookup_address(addr) {
-            vec![Address::Constant(addr)]
+        if let Some(addr) = self.map.lookup_address(OriginalAddress(addr), None) {
+            vec![Address::Constant(addr.into())]
         } else {
             vec![]
         }
@@ -226,10 +333,12 @@ impl AddressTranslator for TranformAddressTranslator {
             return vec![];
         }
         if let (Some(start), Some(end)) = (
-            self.map.lookup_address(start),
-            self.map.lookup_address(start + len),
+            self.map.lookup_address(OriginalAddress(start), None),
+            self.map.lookup_address(OriginalAddress(start + len), None),
         ) {
-            vec![(Address::Constant(start), end - start)]
+            let start: u64 = start.into();
+            let end: u64 = end.into();
+            vec![(Address::Constant(start.into()), end - start)]
         } else {
             vec![]
         }

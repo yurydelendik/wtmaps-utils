@@ -1,4 +1,4 @@
-use crate::address_translator::AddressMap;
+use crate::address_translator::{AddressMap, OriginalAddress, TargetAddress};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::io::Result;
@@ -36,7 +36,10 @@ pub fn read_json_map_transform<R: Read>(reader: R, code_section_offset: u64) -> 
     }) {
         last_addr += addr_delta;
         last_col += col_delta;
-        decoded.insert(last_addr as usize, last_col as usize);
+        decoded.insert(
+            TargetAddress(last_addr as u64),
+            OriginalAddress(last_col as u64),
+        );
     }
     Ok(decoded)
 }

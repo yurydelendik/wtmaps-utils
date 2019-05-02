@@ -1,7 +1,8 @@
 use gimli::write::{self, EndianVec, Sections};
 use gimli::{self, Dwarf, SectionId};
+use std::boxed::Box;
 use std::collections::HashMap;
-use wasmparser::{ModuleReader, SectionCode};
+use wasmparser::{ModuleReader, Range, SectionCode};
 
 pub fn read_dwarf<'a>(bin: &'a [u8]) -> Dwarf<gimli::EndianSlice<'a, gimli::LittleEndian>> {
     let sections = read_dwarf_sections(bin);
@@ -35,13 +36,32 @@ fn read_dwarf_sections<'a>(bin: &'a [u8]) -> HashMap<&'a str, &'a [u8]> {
     sections
 }
 
-pub fn read_code_section_offset(bin: &[u8]) -> usize {
+pub struct CodeSectionOffsets {
+    pub code_section_offset: u64,
+    pub function_ranges: Box<[(u64, u64)]>,
+}
+
+pub fn read_code_section_offsets(bin: &[u8]) -> CodeSectionOffsets {
     for sect in ModuleReader::new(bin).expect("wasm reader") {
         let sect = sect.expect("section");
         match sect.code {
             SectionCode::Code => {
-                let code_section_offset = sect.range().start;
-                return code_section_offset;
+                let code_section_offset = sect.range().start as u64;
+                let code_reader = sect.get_code_section_reader().expect("code section");
+                let ranges = code_reader
+                    .into_iter()
+                    .map(|f| {
+                        let Range { start, end } = f.expect("function").range();
+                        (
+                            start as u64 - code_section_offset,
+                            end as u64 - code_section_offset,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                return CodeSectionOffsets {
+                    code_section_offset,
+                    function_ranges: ranges.into_boxed_slice(),
+                };
             }
             _ => (),
         }

@@ -53,22 +53,28 @@ fn main() {
     let dwarf = wasm::read_dwarf(&bin);
 
     let (map, input_wasm) = if let Some(source_map_file) = &args.flag_source_map {
-        let (input_wasm, code_section_offset) = {
+        let (input_wasm, code_section_offsets) = {
             let wasm_input_file = args
                 .flag_wasm_file
                 .as_ref()
                 .unwrap_or_else(|| &args.arg_output);
             let mut input = fs::read(Path::new(wasm_input_file)).expect("file data");
-            let code_section_offset = wasm::read_code_section_offset(&input) as u64;
+            let code_section_offsets = wasm::read_code_section_offsets(&input);
             wasm::remove_debug_sections(&mut input);
-            (input, code_section_offset)
+            (input, code_section_offsets)
         };
 
         let file = fs::File::open(source_map_file).expect("json file");
-        let map = json_map::read_json_map_transform(BufReader::new(file), code_section_offset)
-            .expect("json");
+        let map = json_map::read_json_map_transform(
+            BufReader::new(file),
+            code_section_offsets.code_section_offset,
+        )
+        .expect("json");
 
-        (Some(map), input_wasm)
+        (
+            Some((map, code_section_offsets.function_ranges)),
+            input_wasm,
+        )
     } else {
         (None, Vec::from(wasm::WASM_HEADER))
     };
@@ -76,7 +82,7 @@ fn main() {
     let mut new_dwarf = if let Some(map) = map {
         build_new_dwarf(
             dwarf,
-            address_translator::TranformAddressTranslator::new(map),
+            address_translator::TranformAddressTranslator::new(map.0, map.1),
         )
     } else {
         build_new_dwarf(dwarf, address_translator::IdentityAddressTranslator(true))
