@@ -111,18 +111,68 @@ fn has_die_back_edge<R: Reader<Offset = usize>>(die: &read::DebuggingInformation
 
 fn has_valid_code_range<R: Reader<Offset = usize>, A: AddressTranslator>(
     die: &read::DebuggingInformationEntry<R>,
+    dwarf: &read::Dwarf<R>,
+    unit: &read::Unit<R>,
     at: &A,
 ) -> read::Result<bool> {
     match die.tag() {
         constants::DW_TAG_subprogram => {
-            if let Some(low_pc) = die.attr_value(constants::DW_AT_low_pc)? {
-                if let read::AttributeValue::Addr(a) = low_pc {
-                    return Ok(at.translate_address(a).len() > 0);
+            if let Some(ranges_attr) = die.attr_value(constants::DW_AT_ranges)? {
+                let offset = match ranges_attr {
+                    read::AttributeValue::RangeListsRef(val) => val,
+                    read::AttributeValue::DebugRngListsIndex(index) => {
+                        dwarf.ranges_offset(unit, index)?
+                    }
+                    _ => return Ok(false),
+                };
+                let mut has_valid_base = if let Some(read::AttributeValue::Addr(low_pc)) =
+                    die.attr_value(constants::DW_AT_low_pc)?
+                {
+                    Some(at.can_translate_address(low_pc))
+                } else {
+                    None
+                };
+                let mut it = dwarf.ranges.raw_ranges(offset, unit.encoding())?;
+                while let Some(range) = it.next()? {
+                    // If at least one of the range addresses can be converted,
+                    // declaring code range as valid.
+                    match range {
+                        read::RawRngListEntry::AddressOrOffsetPair { .. }
+                            if has_valid_base.is_some() =>
+                        {
+                            if has_valid_base.unwrap() {
+                                return Ok(true);
+                            }
+                        }
+                        read::RawRngListEntry::StartEnd { begin, .. }
+                        | read::RawRngListEntry::StartLength { begin, .. }
+                        | read::RawRngListEntry::AddressOrOffsetPair { begin, .. } => {
+                            if at.can_translate_address(begin) {
+                                return Ok(true);
+                            }
+                        }
+                        read::RawRngListEntry::StartxEndx { begin, .. }
+                        | read::RawRngListEntry::StartxLength { begin, .. } => {
+                            let addr = dwarf.address(unit, begin)?;
+                            if at.can_translate_address(addr) {
+                                return Ok(true);
+                            }
+                        }
+                        read::RawRngListEntry::BaseAddress { addr } => {
+                            has_valid_base = Some(at.can_translate_address(addr));
+                        }
+                        read::RawRngListEntry::BaseAddressx { addr } => {
+                            let addr = dwarf.address(unit, addr)?;
+                            has_valid_base = Some(at.can_translate_address(addr));
+                        }
+                        read::RawRngListEntry::OffsetPair { .. } => (),
+                    }
                 }
-            }
-            if let Some(ranges) = die.attr_value(constants::DW_AT_ranges)? {
-                // FIXME check ranges
-                return Ok(true);
+                return Ok(false);
+            } else if let Some(low_pc) = die.attr_value(constants::DW_AT_low_pc)? {
+                if let read::AttributeValue::Addr(a) = low_pc {
+                    return Ok(at.can_translate_address(a));
+                }
             }
         }
         _ => (),
@@ -152,7 +202,7 @@ fn build_die_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
         if has_die_back_edge(child_entry) {
             deps.add_edge(offset, child_offset);
         }
-        if has_valid_code_range(child_entry, at)? {
+        if has_valid_code_range(child_entry, dwarf, unit, at)? {
             deps.add_root(child_offset);
         }
         build_die_dependencies(child, dwarf, unit, at, deps)?;
@@ -163,9 +213,9 @@ fn build_die_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
 fn build_attr_dependencies<R: Reader<Offset = usize>, A: AddressTranslator>(
     attr: &read::Attribute<R>,
     offset: UnitSectionOffset,
-    dwarf: &read::Dwarf<R>,
+    _dwarf: &read::Dwarf<R>,
     unit: &read::Unit<R>,
-    at: &A,
+    _at: &A,
     deps: &mut Dependencies,
 ) -> read::Result<()> {
     match attr.value() {

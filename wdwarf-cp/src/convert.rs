@@ -425,7 +425,7 @@ fn from_rangelist<
     };
     let mut ranges = Vec::new();
     while let Some(from_range) = from.next()? {
-        let range = match from_range {
+        match from_range {
             read::RawRngListEntry::AddressOrOffsetPair { begin, end } => {
                 ranges.push(if let Some(base_address) = base_address {
                     (begin + base_address, end - begin)
@@ -456,7 +456,7 @@ fn from_rangelist<
                 ranges.push((begin, end - begin));
             }
             read::RawRngListEntry::StartLength { begin, length } => ranges.push((begin, length)),
-        };
+        }
     }
     let mut range_list = Vec::new();
     for (start, len) in ranges {
@@ -483,7 +483,7 @@ fn from_loclist<
     };
     let mut locations = Vec::new();
     while let Some(from_loc) = from.next()? {
-        let loc = match from_loc {
+        match from_loc {
             read::RawLocListEntry::AddressOrOffsetPair {
                 begin,
                 end,
@@ -547,7 +547,7 @@ fn from_loclist<
                 locations.push((begin, length, data));
             }
             read::RawLocListEntry::DefaultLocation { .. } => panic!("not supported"),
-        };
+        }
     }
     let mut loc_list = Vec::new();
     for (start, len, ref data) in locations {

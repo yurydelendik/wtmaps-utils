@@ -174,6 +174,10 @@ pub trait AddressTranslator {
             .map(|a| calc_address_offset(translated_base.unwrap(), a))
             .collect::<Vec<_>>()
     }
+
+    fn can_translate_address(&self, addr: u64) -> bool {
+        self.translate_address(addr).len() > 0
+    }
 }
 
 pub struct IdentityAddressTranslator(pub bool);
