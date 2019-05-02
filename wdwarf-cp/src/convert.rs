@@ -314,7 +314,7 @@ fn from_attr_value<
                 .raw_locations(val, context.unit.encoding())?;
             let loc_list = from_loclist(iter, context)?;
             let loc_id = unit.locations.add(loc_list);
-            AttributeValue::LocationListsRef(loc_id)
+            AttributeValue::LocationListRef(loc_id)
         }
         read::AttributeValue::DebugLocListsBase(_base) => {
             // We convert all location list indices to offsets,
@@ -329,7 +329,7 @@ fn from_attr_value<
                 .raw_locations(offset, context.unit.encoding())?;
             let loc_list = from_loclist(iter, context)?;
             let loc_id = unit.locations.add(loc_list);
-            AttributeValue::LocationListsRef(loc_id)
+            AttributeValue::LocationListRef(loc_id)
         }
         read::AttributeValue::RangeListsRef(val) => {
             let iter = context
