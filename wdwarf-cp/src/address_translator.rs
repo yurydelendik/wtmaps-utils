@@ -362,6 +362,23 @@ fn calc_address_offset(addr1: Address, addr2: Address) -> u64 {
     }
 }
 
+fn compare_addresses(addr1: &Address, addr2: &Address) -> std::cmp::Ordering {
+    match (addr1, addr2) {
+        (Address::Constant(val1), Address::Constant(val2)) => val1.cmp(val2),
+        (
+            Address::Symbol {
+                symbol: s1,
+                addend: a1,
+            },
+            Address::Symbol {
+                symbol: s2,
+                addend: a2,
+            },
+        ) if s1 == s2 => a1.cmp(a2),
+        _ => panic!("incompatible addresses"),
+    }
+}
+
 pub trait AddressTranslator {
     fn translate_address(&self, addr: u64) -> Vec<Address>;
 
@@ -371,11 +388,7 @@ pub trait AddressTranslator {
 
     fn translate_base_address(&self, addr: u64) -> Option<Address> {
         let addresses = self.translate_address(addr);
-        if addresses.len() == 0 {
-            None
-        } else {
-            Some(addresses[0])
-        }
+        addresses.into_iter().min_by(compare_addresses)
     }
 
     fn translate_offset(&self, base: u64, offset: u64) -> Vec<u64> {
@@ -383,7 +396,7 @@ pub trait AddressTranslator {
         if translated_base.is_none() {
             return vec![];
         }
-        let addresses = self.translate_address(base + offset);
+        let addresses = self.translate_base_address(base + offset);
         addresses
             .into_iter()
             .map(|a| calc_address_offset(translated_base.unwrap(), a))
@@ -460,10 +473,26 @@ impl AddressTranslator for TranformAddressTranslator {
         if start == 0 {
             return vec![];
         }
-        self.map
-            .lookup_range(OriginalAddress(start), OriginalAddress(start + len))
-            .map(|r| to_addr_len(&r))
-            .collect()
+        let mut it = self
+            .map
+            .lookup_range(OriginalAddress(start), OriginalAddress(start + len));
+        let mut current = if let Some(r) = it.next() {
+            r
+        } else {
+            return vec![];
+        };
+        // Merge two ranges if needed.
+        let mut result = Vec::new();
+        while let Some(next) = it.next() {
+            if current.end == next.start {
+                current.end = next.end;
+            } else {
+                result.push(to_addr_len(&current));
+                current = next;
+            }
+        }
+        result.push(to_addr_len(&current));
+        result
     }
 
     fn translate_function_range(&self, start: u64, len: u64) -> Option<(Address, u64)> {

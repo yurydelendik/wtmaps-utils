@@ -63,7 +63,6 @@ fn main() {
             wasm::remove_debug_sections(&mut input);
             (input, code_section_offsets)
         };
-
         let file = fs::File::open(source_map_file).expect("json file");
         let map = json_map::read_json_map_transform(
             BufReader::new(file),
