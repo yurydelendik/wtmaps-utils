@@ -1,5 +1,5 @@
 use gimli::write::Address;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -60,13 +60,112 @@ impl AddressMap {
 }
 
 type AddressMapIndexRanges = Vec<usize>;
-type FunctionRange = std::ops::Range<TargetAddress>;
+type TargetAddressRange = std::ops::Range<TargetAddress>;
+
+fn to_addr_len(range: &TargetAddressRange) -> (Address, u64) {
+    let start: u64 = range.start.into();
+    let end: u64 = range.end.into();
+    (Address::Constant(start), end - start)
+}
 
 #[derive(Debug)]
 struct AddressMapIndexed {
     map: AddressMap,
     index: BTreeMap<OriginalAddress, AddressMapIndexRanges>,
-    function_ranges: Box<[FunctionRange]>,
+    function_ranges: Box<[TargetAddressRange]>,
+}
+
+enum LookupAddressIterator<'a> {
+    Empty,
+    Mapped {
+        map: &'a AddressMap,
+        range_indicies: &'a [usize],
+        addr: OriginalAddress,
+    },
+}
+
+impl<'a> Iterator for LookupAddressIterator<'a> {
+    type Item = TargetAddress;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            LookupAddressIterator::Empty => None,
+            LookupAddressIterator::Mapped {
+                map,
+                range_indicies,
+                addr,
+            } => {
+                while range_indicies.len() > 0 {
+                    let range_index = range_indicies[0];
+                    *range_indicies = &range_indicies[1..];
+                    let range = &map.ranges[range_index];
+                    let pos = range.keypoints.binary_search_by(|a| a.0.cmp(&addr));
+                    let result = match pos {
+                        Ok(i) => range.keypoints[i].1,
+                        Err(i) => {
+                            if i < range.keypoints.len() {
+                                range.keypoints[i].1
+                            } else {
+                                range.last
+                            }
+                        }
+                    };
+                    return Some(result);
+                }
+                None
+            }
+        }
+    }
+}
+
+struct LookupRangeIterator<'a> {
+    map: &'a AddressMap,
+    ranges: BTreeSet<usize>,
+    start: OriginalAddress,
+    end: OriginalAddress,
+}
+
+impl<'a> Iterator for LookupRangeIterator<'a> {
+    type Item = TargetAddressRange;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while !self.ranges.is_empty() {
+            let range_index = *self.ranges.iter().next().unwrap();
+            self.ranges.take(&range_index);
+            let range = &self.map.ranges[range_index];
+            let start = {
+                let pos = range.keypoints.binary_search_by(|a| a.0.cmp(&self.start));
+                match pos {
+                    Ok(i) => range.keypoints[i].1,
+                    Err(i) => {
+                        if i < range.keypoints.len() {
+                            range.keypoints[i].1
+                        } else {
+                            range.last
+                        }
+                    }
+                }
+            };
+            let end = {
+                let pos = range.keypoints.binary_search_by(|a| a.0.cmp(&self.end));
+                match pos {
+                    Ok(i) => range.keypoints[i].1,
+                    Err(i) => {
+                        if i < range.keypoints.len() {
+                            range.keypoints[i].1
+                        } else {
+                            range.last
+                        }
+                    }
+                }
+            };
+            // Skip empty ranges
+            if start.0 < end.0 {
+                return Some(start..end);
+            }
+        }
+        None
+    }
 }
 
 impl AddressMapIndexed {
@@ -139,7 +238,7 @@ impl AddressMapIndexed {
     fn lookup_function_range_by_target_address(
         &self,
         addr: TargetAddress,
-    ) -> Option<&FunctionRange> {
+    ) -> Option<&TargetAddressRange> {
         match self
             .function_ranges
             .binary_search_by(|x| x.start.cmp(&addr))
@@ -159,8 +258,8 @@ impl AddressMapIndexed {
         None
     }
 
-    fn lookup_function_range(&self, addrs: &[OriginalAddress]) -> Option<&FunctionRange> {
-        // Report function range if TargetAddress in the function range.
+    fn lookup_function_range(&self, addrs: &[OriginalAddress]) -> Option<&TargetAddressRange> {
+        // The function range is found if one of TargetAddress in the function range.
         for addr in addrs {
             let ranges = self.index.range(..=addr).last();
             if ranges.is_none() {
@@ -210,32 +309,39 @@ impl AddressMapIndexed {
         None
     }
 
-    fn lookup_address(
-        &self,
-        addr: OriginalAddress,
-        clamp_to: Option<&FunctionRange>,
-    ) -> Option<TargetAddress> {
+    fn lookup_address(&self, addr: OriginalAddress) -> LookupAddressIterator {
         let ranges = self.index.range(..=addr).last();
         if ranges.is_none() {
-            return None;
+            return LookupAddressIterator::Empty;
         }
-        for range_index in ranges.unwrap().1 {
-            let range = &self.map.ranges[*range_index];
-            let pos = range.keypoints.binary_search_by(|a| a.0.cmp(&addr));
-            let result = match pos {
-                Ok(i) => range.keypoints[i].1,
-                Err(i) => {
-                    if i < range.keypoints.len() {
-                        range.keypoints[i + 1].1
-                    } else {
-                        range.last
-                    }
-                }
-            };
-            // FIXME iterate on all possible variants.
-            return Some(result);
+        LookupAddressIterator::Mapped {
+            map: &self.map,
+            range_indicies: &ranges.unwrap().1,
+            addr,
         }
-        None
+    }
+
+    fn lookup_range(&self, start: OriginalAddress, end: OriginalAddress) -> LookupRangeIterator {
+        use std::ops::Bound::*;
+        let index_range = (
+            match self.index.range(..=start).last() {
+                Some((start, _)) => Included(*start),
+                None => Unbounded,
+            },
+            Included(end),
+        );
+        let mut ranges = BTreeSet::new();
+        for range in self.index.range(index_range) {
+            range.1.iter().for_each(|i| {
+                ranges.insert(*i);
+            });
+        }
+        LookupRangeIterator {
+            map: &self.map,
+            ranges,
+            start,
+            end,
+        }
     }
 }
 
@@ -260,6 +366,8 @@ pub trait AddressTranslator {
     fn translate_address(&self, addr: u64) -> Vec<Address>;
 
     fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)>;
+
+    fn translate_function_range(&self, start: u64, len: u64) -> Option<(Address, u64)>;
 
     fn translate_base_address(&self, addr: u64) -> Option<Address> {
         let addresses = self.translate_address(addr);
@@ -303,6 +411,13 @@ impl AddressTranslator for IdentityAddressTranslator {
         }
         vec![(Address::Constant(start), len)]
     }
+
+    fn translate_function_range(&self, start: u64, len: u64) -> Option<(Address, u64)> {
+        if start == 0 && self.0 {
+            return None;
+        }
+        Some((Address::Constant(start), len))
+    }
 }
 
 pub struct TranformAddressTranslator {
@@ -316,31 +431,49 @@ impl TranformAddressTranslator {
     }
 }
 
+fn from_target_address(addr: TargetAddress) -> Address {
+    Address::Constant(addr.0.into())
+}
+
 impl AddressTranslator for TranformAddressTranslator {
+    fn translate_base_address(&self, addr: u64) -> Option<Address> {
+        if addr == 0 {
+            return None;
+        }
+        self.map
+            .lookup_address(OriginalAddress(addr))
+            .next()
+            .map(from_target_address)
+    }
+
     fn translate_address(&self, addr: u64) -> Vec<Address> {
         if addr == 0 {
             return vec![];
         }
-        if let Some(addr) = self.map.lookup_address(OriginalAddress(addr), None) {
-            vec![Address::Constant(addr.into())]
-        } else {
-            vec![]
-        }
+        self.map
+            .lookup_address(OriginalAddress(addr))
+            .map(from_target_address)
+            .collect()
     }
 
     fn translate_range(&self, start: u64, len: u64) -> Vec<(Address, u64)> {
         if start == 0 {
             return vec![];
         }
-        if let (Some(start), Some(end)) = (
-            self.map.lookup_address(OriginalAddress(start), None),
-            self.map.lookup_address(OriginalAddress(start + len), None),
-        ) {
-            let start: u64 = start.into();
-            let end: u64 = end.into();
-            vec![(Address::Constant(start.into()), end - start)]
+        self.map
+            .lookup_range(OriginalAddress(start), OriginalAddress(start + len))
+            .map(|r| to_addr_len(&r))
+            .collect()
+    }
+
+    fn translate_function_range(&self, start: u64, len: u64) -> Option<(Address, u64)> {
+        let addrs = if len == 0 {
+            vec![OriginalAddress(start)]
         } else {
-            vec![]
-        }
+            vec![OriginalAddress(start), OriginalAddress(start + len - 1)]
+        };
+        self.map
+            .lookup_function_range(&addrs)
+            .map(|p| to_addr_len(p))
     }
 }
