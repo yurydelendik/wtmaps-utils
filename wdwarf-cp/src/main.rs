@@ -5,8 +5,8 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 use wdwarf::{
-    build_dependencies, from_dwarf, AddressTranslator, IdentityAddressTranslator,
-    TranformAddressTranslator,
+    build_dependencies, create_dwarf_sections, from_dwarf, AddressTranslator,
+    IdentityAddressTranslator, TranformAddressTranslator,
 };
 
 mod json_map;
@@ -88,6 +88,6 @@ fn main() {
 
     let mut wasm = Vec::new();
     wasm.extend_from_slice(&input_wasm);
-    wasm.extend_from_slice(&wasm::create_dwarf_sections(&mut new_dwarf));
+    wasm.extend_from_slice(&create_dwarf_sections(&mut new_dwarf).expect("write dwarf sections"));
     fs::write(Path::new(&args.arg_output), &wasm).expect("write wasm");
 }
