@@ -4,10 +4,11 @@ use serde::Deserialize;
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
+use wdwarf::{
+    build_dependencies, from_dwarf, AddressTranslator, IdentityAddressTranslator,
+    TranformAddressTranslator,
+};
 
-mod address_translator;
-mod convert;
-mod gc;
 mod json_map;
 mod wasm;
 
@@ -35,13 +36,13 @@ struct Args {
     flag_wasm_file: Option<String>,
 }
 
-fn build_new_dwarf<R: gimli::Reader<Offset = usize>, A: address_translator::AddressTranslator>(
+fn build_new_dwarf<R: gimli::Reader<Offset = usize>, A: AddressTranslator>(
     dwarf: read::Dwarf<R>,
     at: A,
 ) -> write::ConvertResult<write::Dwarf> {
-    let deps = gc::build_dependencies(&dwarf, &at).expect("deps");
+    let deps = build_dependencies(&dwarf, &at).expect("deps");
     let reachable = deps.get_reachable();
-    convert::from_dwarf(&dwarf, &at, &|uo| reachable.contains(&uo))
+    from_dwarf(&dwarf, &at, &|uo| reachable.contains(&uo))
 }
 
 fn main() {
@@ -79,12 +80,9 @@ fn main() {
     };
 
     let mut new_dwarf = if let Some(map) = map {
-        build_new_dwarf(
-            dwarf,
-            address_translator::TranformAddressTranslator::new(map.0, map.1),
-        )
+        build_new_dwarf(dwarf, TranformAddressTranslator::new(map.0, map.1))
     } else {
-        build_new_dwarf(dwarf, address_translator::IdentityAddressTranslator(true))
+        build_new_dwarf(dwarf, IdentityAddressTranslator(true))
     }
     .expect("new dwarf");
 

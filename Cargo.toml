@@ -2,6 +2,7 @@
 
 members = [
   "wtmaps",
+  "wdwarf",
   "wdwarf-cp",
 ]
 

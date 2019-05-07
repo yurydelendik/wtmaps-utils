@@ -1,9 +1,9 @@
-use crate::address_translator::{AddressMap, OriginalAddress, TargetAddress};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::io::Result;
 use std::vec::Vec;
 use vlq::decode;
+use wdwarf::{AddressMap, OriginalAddress, TargetAddress};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SourceMap {
