@@ -196,19 +196,21 @@ impl AddressMapIndexed {
             }
             if !active_ranges.contains_key(&first_addr) {
                 let last = active_ranges.range(..first_addr).last();
-                if let Some((_, ranges)) = last {
-                    active_ranges.insert(first_addr, ranges.clone());
+                let ranges = if let Some((_, ranges)) = last {
+                    ranges.clone()
                 } else {
-                    active_ranges.insert(first_addr, Vec::new());
-                }
+                    Vec::new()
+                };
+                active_ranges.insert(first_addr, ranges);
             }
             if !active_ranges.contains_key(&last_addr) {
                 let last = active_ranges.range(..last_addr).last();
-                if let Some((_, ranges)) = last {
-                    active_ranges.insert(first_addr, ranges.clone());
+                let ranges = if let Some((_, ranges)) = last {
+                    ranges.clone()
                 } else {
-                    active_ranges.insert(first_addr, Vec::new());
-                }
+                    Vec::new()
+                };
+                active_ranges.insert(first_addr, ranges);
             }
             for (_, ranges) in active_ranges.range_mut(first_addr..=last_addr) {
                 ranges.push(index);
