@@ -221,19 +221,18 @@ fn from_die<R: Reader<Offset = usize>, A: AddressTranslator, F: Fn(UnitSectionOf
             }
         }
         if is_function_die {
-            let low_pc = if let Some(read::AttributeValue::Addr(addr)) =
+            if let Some(read::AttributeValue::Addr(low_pc)) =
                 from.attr_value(constants::DW_AT_low_pc)?
             {
-                addr
+                if let Some((addr, len)) = context.at.translate_function_range(low_pc, 0) {
+                    let entry = unit.get_mut(entry_id);
+                    entry.set(constants::DW_AT_low_pc, AttributeValue::Address(addr));
+                    entry.set(constants::DW_AT_high_pc, AttributeValue::Udata(len));
+                } else {
+                    return Err(ConvertError::InvalidAddress);
+                }
             } else {
-                return Err(ConvertError::InvalidAddress);
-            };
-            if let Some((addr, len)) = context.at.translate_function_range(low_pc, 0) {
-                let entry = unit.get_mut(entry_id);
-                entry.set(constants::DW_AT_low_pc, AttributeValue::Address(addr));
-                entry.set(constants::DW_AT_high_pc, AttributeValue::Udata(len));
-            } else {
-                return Err(ConvertError::InvalidAddress);
+                println!("TODO: low_pc not found, inlined?");
             }
         }
     }
