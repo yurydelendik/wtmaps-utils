@@ -5,6 +5,3 @@ members = [
   "wdwarf",
   "wdwarf-cp",
 ]
-
-[patch.crates-io]
-gimli = { git = "https://github.com/gimli-rs/gimli", rev="423431f6747167af8e64cc8c8378f9a34a18ff8f" }

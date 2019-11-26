@@ -10,5 +10,5 @@ vlq = "0.5.1"
 serde = "1.0.75"
 serde_json = "1.0.39"
 docopt = "1.0.1"
-gimli = "0.18.0"
+gimli = "0.19.0"
 wdwarf = { path = "../wdwarf" }

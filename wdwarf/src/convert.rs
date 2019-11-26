@@ -645,23 +645,28 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
 
     let mut program = {
         let from_header = from_program.header();
+        let encoding = from_header.encoding();
 
-        let comp_dir = from_header
-            .directory(0)
-            .ok_or(ConvertError::MissingCompilationDirectory)?;
-        let comp_dir = from_line_string(comp_dir, dwarf, line_strings, strings)?;
+        let comp_dir = match from_header.directory(0) {
+            Some(comp_dir) => from_line_string(comp_dir, dwarf, line_strings, strings)?,
+            None => LineString::new(&[][..], encoding, line_strings),
+        };
 
-        let comp_file = from_header
-            .file(0)
-            .ok_or(ConvertError::MissingCompilationFile)?;
-        let comp_name = from_line_string(comp_file.path_name(), dwarf, line_strings, strings)?;
-        if comp_file.directory_index() != 0 {
-            return Err(ConvertError::InvalidDirectoryIndex);
-        }
-        let comp_file_info = FileInfo {
-            timestamp: comp_file.timestamp(),
-            size: comp_file.size(),
-            md5: *comp_file.md5(),
+        let (comp_name, comp_file_info) = match from_header.file(0) {
+            Some(comp_file) => {
+                if comp_file.directory_index() != 0 {
+                    return Err(ConvertError::InvalidDirectoryIndex);
+                }
+                (
+                    from_line_string(comp_file.path_name(), dwarf, line_strings, strings)?,
+                    Some(FileInfo {
+                        timestamp: comp_file.timestamp(),
+                        size: comp_file.size(),
+                        md5: *comp_file.md5(),
+                    }),
+                )
+            }
+            None => (LineString::new(&[][..], encoding, line_strings), None),
         };
 
         if from_header.line_base() > 0 {
@@ -672,7 +677,7 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
             from_header.line_encoding(),
             comp_dir,
             comp_name,
-            Some(comp_file_info),
+            comp_file_info,
         );
 
         let file_skip;
