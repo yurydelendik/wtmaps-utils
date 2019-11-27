@@ -764,6 +764,13 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
                                 }
                             }
                             translated_rows.sort_by(|(a, _), (b, _)| a.cmp(b));
+                            // TODO do we need to dedup row addresses?
+                            translated_rows.dedup_by(|(a, _), (b, _)| a == b);
+                            let last = translated_rows
+                                .last()
+                                .map(|r| r.0)
+                                .or_else(|| temp_line_sequence.base_address)
+                                .unwrap();
                             for (address_offset, row) in translated_rows {
                                 program.row().address_offset = address_offset;
                                 program.row().op_index = row.op_index;
@@ -778,7 +785,8 @@ fn from_line_program<R: Reader<Offset = usize>, A: AddressTranslator>(
                                 program.row().isa = row.isa;
                                 program.generate_row();
                             }
-                            program.end_sequence(from_row.address());
+                            // TODO use real end-of-function address (instead of last + 1)
+                            program.end_sequence(last + 1);
                         }
                         temp_line_sequence.clear();
                     } else {
