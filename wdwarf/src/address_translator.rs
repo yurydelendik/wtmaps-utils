@@ -398,9 +398,18 @@ pub trait AddressTranslator {
         if translated_base.is_none() {
             return vec![];
         }
-        let addresses = self.translate_base_address(base + offset);
+        let addresses = self.translate_address(base + offset);
         addresses
             .into_iter()
+            .filter(|a| {
+                match compare_addresses(translated_base.as_ref().unwrap(), &a) {
+                    std::cmp::Ordering::Greater => {
+                        eprintln!("TODO: translated_base.as_ref().unwrap() <= a: {:?} > {:?} (base: {}, offset: {})", translated_base.unwrap(), a, base, offset);
+                        false
+                    }
+                    _ => true,
+                }
+            })
             .map(|a| calc_address_offset(translated_base.unwrap(), a))
             .collect::<Vec<_>>()
     }
